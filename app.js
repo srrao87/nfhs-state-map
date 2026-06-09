@@ -11,7 +11,7 @@
   ];
 
   const MODE_B_BUCKETS = [
-    { id: "highest-improvement", label: "Highest improvement", color: "#14a44d" },
+    { id: "highest-improvement", label: "Highest improvement", color: "#16a34a" },
     { id: "improvement", label: "Improvement", color: "#4c8f48" },
     { id: "no-change", label: "No change", color: "#d7d4ce" },
     { id: "worsened", label: "Worsened", color: "#dcb955" },
@@ -19,34 +19,86 @@
     { id: "missing", label: "Missing data", color: "#c7c2b8", missing: true },
   ];
 
-  const TFR_SPECIAL_BUCKET = {
+  const TFR_BUCKET = {
     id: "below-replacement",
     label: "Below replacement-level fertility, TFR < 2.1",
-    color: "rgba(122, 71, 197, 0.12)",
-    special: true,
   };
 
   const state = {
     dataset: null,
     geojson: null,
-    indicator: null,
+    indicatorsById: new Map(),
+    regionsByGeoName: new Map(),
+    selectedIndicatorId: null,
     mode: "india",
-    analyticsCache: new Map(),
-    legendSelection: null,
+    activeLegendSelection: null,
   };
 
   const ui = {
+    error: document.querySelector("#app-error"),
     indicatorSelect: document.querySelector("#indicator-select"),
-    modeInputs: document.querySelectorAll('input[name="mode"]'),
-    indicatorDetails: document.querySelector("#indicator-details"),
-    hoverDetails: document.querySelector("#hover-details"),
-    selectedStates: document.querySelector("#selected-states"),
+    modeInputs: Array.from(document.querySelectorAll('input[name="mode"]')),
     legendItems: document.querySelector("#legend-items"),
     legendNote: document.querySelector("#legend-note"),
+    indicatorDetails: document.querySelector("#indicator-details"),
+    selectedStates: document.querySelector("#selected-states"),
+    hoverDetails: document.querySelector("#hover-details"),
     clearSelection: document.querySelector("#clear-selection"),
+    svg: document.querySelector("#map"),
     tooltip: document.querySelector("#tooltip"),
-    svg: d3.select("#map"),
   };
+
+  function showError(message) {
+    ui.error.textContent = message;
+    ui.error.classList.remove("hidden");
+    ui.indicatorDetails.innerHTML = `<p>${message}</p>`;
+    ui.selectedStates.className = "stack muted";
+    ui.selectedStates.textContent = "Unable to load the visualisation.";
+    ui.hoverDetails.className = "stack muted";
+    ui.hoverDetails.textContent = "Unable to load the visualisation.";
+    ui.legendItems.innerHTML = "";
+    ui.legendNote.textContent = "";
+    ui.svg.innerHTML = "";
+  }
+
+  function clearError() {
+    ui.error.textContent = "";
+    ui.error.classList.add("hidden");
+  }
+
+  async function fetchJson(relativePath, label) {
+    const response = await fetch(relativePath, { cache: "no-cache" });
+    if (!response.ok) {
+      throw new Error(`${label} request failed with HTTP ${response.status} for ${relativePath}`);
+    }
+    const text = await response.text();
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      throw new Error(`${label} is not valid JSON at ${relativePath}: ${error.message}`);
+    }
+  }
+
+  function assert(condition, message) {
+    if (!condition) {
+      throw new Error(message);
+    }
+  }
+
+  function validateDataset(dataset) {
+    assert(dataset && typeof dataset === "object", "Indicator dataset is missing or malformed.");
+    assert(Array.isArray(dataset.indicators), "Indicator dataset is missing the indicators array.");
+    assert(Array.isArray(dataset.regions), "Indicator dataset is missing the regions array.");
+    dataset.indicators.forEach((indicator, index) => {
+      assert(indicator.id && indicator.display_label, `Indicator ${index + 1} is missing id or display_label.`);
+      assert(indicator.polarity === "positive" || indicator.polarity === "negative", `Indicator ${indicator.id} has invalid polarity.`);
+    });
+  }
+
+  function validateGeojson(geojson) {
+    assert(geojson && geojson.type === "FeatureCollection", "Boundary file is not a GeoJSON FeatureCollection.");
+    assert(Array.isArray(geojson.features), "Boundary file is missing the features array.");
+  }
 
   function roundToPrecision(value, precision) {
     if (value == null) {
@@ -54,6 +106,18 @@
     }
     const factor = 10 ** precision;
     return Math.round(value * factor) / factor;
+  }
+
+  function compareAtPrintedPrecision(left, right, precision) {
+    if (left == null || right == null) {
+      return "missing";
+    }
+    const a = roundToPrecision(left, precision);
+    const b = roundToPrecision(right, precision);
+    if (a === b) {
+      return "equal";
+    }
+    return a > b ? "higher" : "lower";
   }
 
   function formatValue(value, precision, unit) {
@@ -73,153 +137,125 @@
     return unit === "%" ? `${sign}${fixed} pp` : `${sign}${fixed}`;
   }
 
-  function formatZ(value) {
+  function formatNumber(value, digits) {
     if (value == null || !Number.isFinite(value)) {
       return "NA";
     }
-    return value.toFixed(2);
-  }
-
-  function formatPercentile(value) {
-    if (value == null || !Number.isFinite(value)) {
-      return "NA";
-    }
-    return `${value.toFixed(0)}`;
-  }
-
-  function compareAtPrintedPrecision(left, right, precision) {
-    if (left == null || right == null) {
-      return "missing";
-    }
-    const a = roundToPrecision(left, precision);
-    const b = roundToPrecision(right, precision);
-    if (a === b) {
-      return "equal";
-    }
-    return a > b ? "higher" : "lower";
+    return value.toFixed(digits);
   }
 
   function clamp(value, min, max) {
-    return Math.min(max, Math.max(min, value));
+    return Math.max(min, Math.min(max, value));
   }
 
-  function getIndicator() {
-    return state.dataset.indicators.find((item) => item.id === state.indicator);
+  function getIndicator(indicatorId) {
+    return state.indicatorsById.get(indicatorId || state.selectedIndicatorId);
+  }
+
+  function getRegionValue(regionName, indicatorId) {
+    const region = state.regionsByGeoName.get(regionName);
+    if (!region) {
+      return null;
+    }
+    return region.values[indicatorId || state.selectedIndicatorId] || null;
   }
 
   function getPolarity(indicator) {
-    return indicator?.polarity ?? "positive";
-  }
-
-  function getRegionRecord(regionName) {
-    return state.dataset.regions.find((item) => item.geojson_name === regionName);
-  }
-
-  function getRegionValue(regionName) {
-    const region = getRegionRecord(regionName);
-    return region ? region.values[state.indicator] : null;
-  }
-
-  function getFactsheetValues(regionName, indicator) {
-    const region = state.dataset.regions.find((item) => item.geojson_name === regionName);
-    return region ? region.values[indicator.id] : null;
+    return indicator.polarity;
   }
 
   function getGoodnessDiffFromIndia(regionName, indicator) {
-    const values = getFactsheetValues(regionName, indicator);
-    if (!values || values.nfhs6 == null || values.india_nfhs6 == null) {
+    const value = getRegionValue(regionName, indicator.id);
+    if (!value || value.nfhs6 == null || value.india_nfhs6 == null) {
       return null;
     }
-    const rawDiffFromIndia = values.nfhs6 - values.india_nfhs6;
+    const rawDiffFromIndia = value.nfhs6 - value.india_nfhs6;
     return getPolarity(indicator) === "positive" ? rawDiffFromIndia : -rawDiffFromIndia;
   }
 
   function getImprovementScore(regionName, indicator) {
-    const values = getFactsheetValues(regionName, indicator);
-    if (!values || values.nfhs6 == null || values.nfhs5 == null) {
+    const value = getRegionValue(regionName, indicator.id);
+    if (!value || value.nfhs6 == null || value.nfhs5 == null) {
       return null;
     }
-    if (compareAtPrintedPrecision(values.nfhs6, values.nfhs5, indicator.precision) === "equal") {
+    const equality = compareAtPrintedPrecision(value.nfhs6, value.nfhs5, indicator.precision);
+    if (equality === "equal") {
       return 0;
     }
-    const rawChange = values.nfhs6 - values.nfhs5;
+    const rawChange = value.nfhs6 - value.nfhs5;
     return getPolarity(indicator) === "positive" ? rawChange : -rawChange;
   }
 
-  function computeSpread(scores) {
-    if (!scores.length) {
+  function getStatsSpread(values) {
+    if (!values.length) {
       return 1;
     }
-    const mean = d3.mean(scores);
-    const variance = d3.mean(scores.map((score) => (score - mean) ** 2));
-    const standardDeviation = Math.sqrt(variance ?? 0);
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+    const standardDeviation = Math.sqrt(variance);
     if (standardDeviation > 0) {
       return standardDeviation;
     }
-    const maxAbs = d3.max(scores.map((score) => Math.abs(score))) ?? 1;
-    return maxAbs || 1;
+    const maxAbsolute = Math.max(...values.map((value) => Math.abs(value)));
+    return maxAbsolute || 1;
   }
 
-  function computeRankMaps(entries, scoreKey) {
-    const descending = [...entries].sort((a, b) => b[scoreKey] - a[scoreKey] || a.regionName.localeCompare(b.regionName));
-    const ascending = [...entries].sort((a, b) => a[scoreKey] - b[scoreKey] || a.regionName.localeCompare(b.regionName));
+  function rankEntries(entries, scoreKey) {
+    const sortedDesc = [...entries].sort((a, b) => b[scoreKey] - a[scoreKey] || a.regionName.localeCompare(b.regionName));
+    const sortedAsc = [...entries].sort((a, b) => a[scoreKey] - b[scoreKey] || a.regionName.localeCompare(b.regionName));
     const rankMap = new Map();
     const percentileMap = new Map();
 
-    let lastScoreDesc = null;
+    let lastScore = null;
     let currentRank = 0;
-    descending.forEach((entry, index) => {
-      if (lastScoreDesc === null || entry[scoreKey] !== lastScoreDesc) {
+    sortedDesc.forEach((entry, index) => {
+      if (lastScore === null || entry[scoreKey] !== lastScore) {
         currentRank = index + 1;
-        lastScoreDesc = entry[scoreKey];
+        lastScore = entry[scoreKey];
       }
       rankMap.set(entry.regionName, currentRank);
     });
 
-    const groupedAscending = d3.groups(ascending, (entry) => entry[scoreKey]);
+    const groups = new Map();
+    sortedAsc.forEach((entry) => {
+      const key = String(entry[scoreKey]);
+      if (!groups.has(key)) {
+        groups.set(key, []);
+      }
+      groups.get(key).push(entry);
+    });
+
     let position = 0;
-    groupedAscending.forEach(([, group]) => {
+    groups.forEach((group) => {
       const start = position;
       const end = position + group.length - 1;
-      const averagePosition = (start + end) / 2;
-      const percentile = ascending.length <= 1 ? 100 : (averagePosition / (ascending.length - 1)) * 100;
+      const avgPos = (start + end) / 2;
+      const percentile = sortedAsc.length <= 1 ? 100 : (avgPos / (sortedAsc.length - 1)) * 100;
       group.forEach((entry) => percentileMap.set(entry.regionName, percentile));
       position += group.length;
     });
 
-    return { rankMap, percentileMap, descending };
+    return { sortedDesc, rankMap, percentileMap };
   }
 
-  function getModeABucketByZ(zValue) {
-    if (zValue == null) {
+  function modeABucketForZ(z) {
+    if (z == null) {
       return MODE_A_BUCKETS.find((bucket) => bucket.id === "missing");
     }
-    if (zValue <= -2) {
-      return MODE_A_BUCKETS[0];
-    }
-    if (zValue <= -1) {
-      return MODE_A_BUCKETS[1];
-    }
-    if (zValue < -0.25) {
-      return MODE_A_BUCKETS[2];
-    }
-    if (zValue <= 0.25) {
-      return MODE_A_BUCKETS[3];
-    }
-    if (zValue < 1) {
-      return MODE_A_BUCKETS[4];
-    }
-    if (zValue < 2) {
-      return MODE_A_BUCKETS[5];
-    }
+    if (z <= -2) return MODE_A_BUCKETS[0];
+    if (z <= -1) return MODE_A_BUCKETS[1];
+    if (z < -0.25) return MODE_A_BUCKETS[2];
+    if (z <= 0.25) return MODE_A_BUCKETS[3];
+    if (z < 1) return MODE_A_BUCKETS[4];
+    if (z < 2) return MODE_A_BUCKETS[5];
     return MODE_A_BUCKETS[6];
   }
 
-  function getModeBBucketByScore(entry) {
-    if (entry == null) {
+  function modeBBucketForEntry(entry) {
+    if (!entry) {
       return MODE_B_BUCKETS.find((bucket) => bucket.id === "missing");
     }
-    if (entry.isEqual) {
+    if (entry.equalAfterRounding) {
       return MODE_B_BUCKETS.find((bucket) => bucket.id === "no-change");
     }
     if (entry.improvementScore > 0 && entry.changeZ >= 1) {
@@ -237,22 +273,21 @@
   function getModeAPercentiles(indicator) {
     const entries = state.geojson.features.map((feature) => {
       const regionName = feature.properties.name;
-      const values = getFactsheetValues(regionName, indicator);
+      const values = getRegionValue(regionName, indicator.id);
       const goodnessDiffFromIndia = getGoodnessDiffFromIndia(regionName, indicator);
       return { regionName, values, goodnessDiffFromIndia };
     });
 
-    const validEntries = entries.filter((entry) => entry.goodnessDiffFromIndia != null);
-    const spread = computeSpread(validEntries.map((entry) => entry.goodnessDiffFromIndia));
-    const { rankMap, percentileMap, descending } = computeRankMaps(validEntries, "goodnessDiffFromIndia");
-
+    const valid = entries.filter((entry) => entry.goodnessDiffFromIndia != null);
+    const spread = getStatsSpread(valid.map((entry) => entry.goodnessDiffFromIndia));
+    const rankings = rankEntries(valid, "goodnessDiffFromIndia");
     const byRegion = new Map();
+
     entries.forEach((entry) => {
       if (entry.goodnessDiffFromIndia == null) {
         byRegion.set(entry.regionName, {
           ...entry,
           zFromIndia: null,
-          zFromIndiaClamped: null,
           percentile: null,
           rank: null,
           bucket: MODE_A_BUCKETS.find((bucket) => bucket.id === "missing"),
@@ -261,18 +296,16 @@
         return;
       }
       const zFromIndia = entry.goodnessDiffFromIndia / spread;
-      const zFromIndiaClamped = clamp(zFromIndia, -2.5, 2.5);
-      const bucket = getModeABucketByZ(zFromIndiaClamped);
-      const roundedComparison = compareAtPrintedPrecision(entry.values.nfhs6, entry.values.india_nfhs6, indicator.precision);
+      const bucket = modeABucketForZ(clamp(zFromIndia, -2.5, 2.5));
+      const comparison = compareAtPrintedPrecision(entry.values.nfhs6, entry.values.india_nfhs6, indicator.precision);
       byRegion.set(entry.regionName, {
         ...entry,
         zFromIndia,
-        zFromIndiaClamped,
-        percentile: percentileMap.get(entry.regionName),
-        rank: rankMap.get(entry.regionName),
+        percentile: rankings.percentileMap.get(entry.regionName),
+        rank: rankings.rankMap.get(entry.regionName),
         bucket,
         status:
-          roundedComparison === "equal"
+          comparison === "equal"
             ? "Same as India average"
             : entry.goodnessDiffFromIndia > 0
               ? "Better than India average"
@@ -280,43 +313,36 @@
       });
     });
 
-    return {
-      type: "india",
-      spread,
-      byRegion,
-      ordered: descending,
-      bucketDefs: MODE_A_BUCKETS,
-    };
+    return { byRegion, ordered: rankings.sortedDesc, bucketDefs: MODE_A_BUCKETS };
   }
 
   function getModeABucket(regionName, indicator) {
-    return getModeAPercentiles(indicator).byRegion.get(regionName)?.bucket ?? MODE_A_BUCKETS.find((bucket) => bucket.id === "missing");
+    return getModeAPercentiles(indicator).byRegion.get(regionName)?.bucket;
   }
 
   function getModeBPercentiles(indicator) {
     const entries = state.geojson.features.map((feature) => {
       const regionName = feature.properties.name;
-      const values = getFactsheetValues(regionName, indicator);
+      const values = getRegionValue(regionName, indicator.id);
       const improvementScore = getImprovementScore(regionName, indicator);
-      const isEqual =
+      const equalAfterRounding =
         values &&
         values.nfhs6 != null &&
         values.nfhs5 != null &&
         compareAtPrintedPrecision(values.nfhs6, values.nfhs5, indicator.precision) === "equal";
-      return { regionName, values, improvementScore, isEqual };
+      return { regionName, values, improvementScore, equalAfterRounding };
     });
 
-    const validEntries = entries.filter((entry) => entry.improvementScore != null);
-    const spread = computeSpread(validEntries.map((entry) => entry.improvementScore));
-    const { rankMap, percentileMap, descending } = computeRankMaps(validEntries, "improvementScore");
-
+    const valid = entries.filter((entry) => entry.improvementScore != null);
+    const spread = getStatsSpread(valid.map((entry) => entry.improvementScore));
+    const rankings = rankEntries(valid, "improvementScore");
     const byRegion = new Map();
+
     entries.forEach((entry) => {
       if (entry.improvementScore == null) {
         byRegion.set(entry.regionName, {
           ...entry,
           changeZ: null,
-          changeZClamped: null,
           percentile: null,
           rank: null,
           bucket: MODE_B_BUCKETS.find((bucket) => bucket.id === "missing"),
@@ -325,195 +351,157 @@
         return;
       }
       const changeZ = entry.improvementScore / spread;
-      const changeZClamped = clamp(changeZ, -2.5, 2.5);
       const enriched = {
         ...entry,
         changeZ,
-        changeZClamped,
-        percentile: percentileMap.get(entry.regionName),
-        rank: rankMap.get(entry.regionName),
+        percentile: rankings.percentileMap.get(entry.regionName),
+        rank: rankings.rankMap.get(entry.regionName),
       };
-      const bucket = getModeBBucketByScore(enriched);
       byRegion.set(entry.regionName, {
         ...enriched,
-        bucket,
-        status: entry.isEqual
-          ? "No change since NFHS-5"
-          : entry.improvementScore > 0
-            ? "Improved since NFHS-5"
-            : "Worsened since NFHS-5",
+        bucket: modeBBucketForEntry(enriched),
+        status:
+          entry.equalAfterRounding
+            ? "No change since NFHS-5"
+            : entry.improvementScore > 0
+              ? "Improved since NFHS-5"
+              : "Worsened since NFHS-5",
       });
     });
 
-    return {
-      type: "nfhs5",
-      spread,
-      byRegion,
-      ordered: descending,
-      bucketDefs: MODE_B_BUCKETS,
-    };
+    return { byRegion, ordered: rankings.sortedDesc, bucketDefs: MODE_B_BUCKETS };
   }
 
   function getModeBBucket(regionName, indicator) {
-    return getModeBPercentiles(indicator).byRegion.get(regionName)?.bucket ?? MODE_B_BUCKETS.find((bucket) => bucket.id === "missing");
+    return getModeBPercentiles(indicator).byRegion.get(regionName)?.bucket;
   }
 
   function isBelowReplacementFertility(regionName, indicator) {
-    if (!indicator || !/total fertility rate|tfr/i.test(indicator.label)) {
+    if (!/total fertility rate|tfr/i.test(indicator.label)) {
       return false;
     }
-    const values = getFactsheetValues(regionName, indicator);
-    return Boolean(values && values.nfhs6 != null && values.nfhs6 < 2.1);
+    const value = getRegionValue(regionName, indicator.id);
+    return Boolean(value && value.nfhs6 != null && value.nfhs6 < 2.1);
   }
 
   function getAnalytics() {
-    const cacheKey = `${state.mode}:${state.indicator}`;
-    if (state.analyticsCache.has(cacheKey)) {
-      return state.analyticsCache.get(cacheKey);
-    }
     const indicator = getIndicator();
-    const analytics = state.mode === "india" ? getModeAPercentiles(indicator) : getModeBPercentiles(indicator);
-    state.analyticsCache.set(cacheKey, analytics);
-    return analytics;
+    return state.mode === "india" ? getModeAPercentiles(indicator) : getModeBPercentiles(indicator);
   }
 
   function getEntry(regionName) {
     return getAnalytics().byRegion.get(regionName);
   }
 
-  function getBucketCount(bucketId) {
-    const analytics = getAnalytics();
-    let count = 0;
-    analytics.byRegion.forEach((entry) => {
-      if (entry.bucket.id === bucketId) {
-        count += 1;
-      }
-    });
-    return count;
-  }
-
-  function getTfrCount() {
-    const indicator = getIndicator();
-    return state.geojson.features.filter((feature) => isBelowReplacementFertility(feature.properties.name, indicator)).length;
-  }
-
-  function getSelectionMatch(regionName) {
-    if (!state.legendSelection) {
-      return true;
-    }
-    const indicator = getIndicator();
-    if (state.legendSelection.type === "tfr") {
-      return isBelowReplacementFertility(regionName, indicator);
-    }
-    return getEntry(regionName)?.bucket.id === state.legendSelection.id;
-  }
-
-  function handleLegendClick(bucketId, type = "bucket") {
-    if (state.legendSelection && state.legendSelection.id === bucketId && state.legendSelection.type === type) {
-      clearLegendSelection();
-      return;
-    }
-    state.legendSelection = { id: bucketId, type };
-    drawMap();
-  }
-
-  function clearLegendSelection() {
-    state.legendSelection = null;
-    drawMap();
-  }
-
-  function renderIndicatorSelect() {
-    ui.indicatorSelect.innerHTML = "";
-    state.dataset.indicators.forEach((indicator) => {
-      const option = document.createElement("option");
-      option.value = indicator.id;
-      option.textContent = indicator.display_label;
-      ui.indicatorSelect.append(option);
-    });
-    state.indicator = state.dataset.indicators[0].id;
-    ui.indicatorSelect.value = state.indicator;
-  }
-
   function updateLegend() {
-    const analytics = getAnalytics();
     const indicator = getIndicator();
+    const analytics = getAnalytics();
     ui.legendItems.innerHTML = "";
     ui.legendNote.textContent =
       state.mode === "india"
-        ? "Stronger colour intensity means farther from the printed India NFHS-6 value, after adjusting for indicator polarity."
-        : "Stronger colour intensity means greater improvement or regression since NFHS-5, after adjusting for indicator polarity.";
+        ? "Darker colour means farther from the India NFHS-6 reference value after polarity adjustment."
+        : "Darker or stronger colour means greater improvement or regression since NFHS-5 after polarity adjustment.";
 
     analytics.bucketDefs.forEach((bucket) => {
+      const count = Array.from(analytics.byRegion.values()).filter((entry) => entry.bucket.id === bucket.id).length;
       const button = document.createElement("button");
       button.type = "button";
-      button.className = `legend-item${state.legendSelection?.type === "bucket" && state.legendSelection.id === bucket.id ? " active" : ""}`;
+      button.className = `legend-item${state.activeLegendSelection?.type === "bucket" && state.activeLegendSelection.id === bucket.id ? " active" : ""}`;
       button.innerHTML = `
         <span class="swatch ${bucket.missing ? "missing-style" : ""}" style="background:${bucket.color}"></span>
         <span class="legend-item-label">${bucket.label}</span>
-        <span class="legend-item-count">${getBucketCount(bucket.id)}</span>
+        <span class="legend-item-count">${count}</span>
       `;
       button.addEventListener("click", () => handleLegendClick(bucket.id, "bucket"));
-      ui.legendItems.append(button);
+      ui.legendItems.appendChild(button);
     });
 
     if (/total fertility rate|tfr/i.test(indicator.label)) {
-      const tfrButton = document.createElement("button");
-      tfrButton.type = "button";
-      tfrButton.className = `legend-item${state.legendSelection?.type === "tfr" ? " active" : ""}`;
-      tfrButton.innerHTML = `
+      const count = state.geojson.features.filter((feature) => isBelowReplacementFertility(feature.properties.name, indicator)).length;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `legend-item${state.activeLegendSelection?.type === "tfr" ? " active" : ""}`;
+      button.innerHTML = `
         <span class="swatch tfr-style"></span>
-        <span class="legend-item-label">${TFR_SPECIAL_BUCKET.label}</span>
-        <span class="legend-item-count">${getTfrCount()}</span>
+        <span class="legend-item-label">${TFR_BUCKET.label}</span>
+        <span class="legend-item-count">${count}</span>
       `;
-      tfrButton.addEventListener("click", () => handleLegendClick(TFR_SPECIAL_BUCKET.id, "tfr"));
-      ui.legendItems.append(tfrButton);
+      button.addEventListener("click", () => handleLegendClick(TFR_BUCKET.id, "tfr"));
+      ui.legendItems.appendChild(button);
     }
   }
 
+  function handleLegendClick(bucketId, type) {
+    if (
+      state.activeLegendSelection &&
+      state.activeLegendSelection.id === bucketId &&
+      state.activeLegendSelection.type === type
+    ) {
+      clearLegendSelection();
+      return;
+    }
+    state.activeLegendSelection = { id: bucketId, type };
+    render();
+  }
+
+  function clearLegendSelection() {
+    state.activeLegendSelection = null;
+    render();
+  }
+
+  function isSelectedByLegend(regionName) {
+    if (!state.activeLegendSelection) {
+      return true;
+    }
+    const indicator = getIndicator();
+    if (state.activeLegendSelection.type === "tfr") {
+      return isBelowReplacementFertility(regionName, indicator);
+    }
+    return getEntry(regionName).bucket.id === state.activeLegendSelection.id;
+  }
+
   function updateSelectedStatesPanel() {
-    if (!state.legendSelection) {
+    if (!state.activeLegendSelection) {
       ui.selectedStates.className = "stack muted";
       ui.selectedStates.textContent = "Click a legend bucket to select matching states and UTs.";
       return;
     }
-
     const indicator = getIndicator();
-    const matched = state.geojson.features
+    const names = state.geojson.features
       .map((feature) => feature.properties.name)
-      .filter((regionName) => getSelectionMatch(regionName))
+      .filter((name) => isSelectedByLegend(name))
       .sort((a, b) => a.localeCompare(b));
 
     const label =
-      state.legendSelection.type === "tfr"
-        ? TFR_SPECIAL_BUCKET.label
-        : getAnalytics().bucketDefs.find((bucket) => bucket.id === state.legendSelection.id)?.label;
+      state.activeLegendSelection.type === "tfr"
+        ? TFR_BUCKET.label
+        : getAnalytics().bucketDefs.find((bucket) => bucket.id === state.activeLegendSelection.id).label;
 
     ui.selectedStates.className = "stack";
     ui.selectedStates.innerHTML = `
       <p><span class="label">Selected bucket</span><br><span class="value">${label}</span></p>
-      <p><span class="label">Matching states and UTs</span><br><span class="value">${matched.length}</span></p>
-      <ul>${matched.map((name) => `<li>${name}${isBelowReplacementFertility(name, indicator) ? " (below replacement level)" : ""}</li>`).join("")}</ul>
+      <p><span class="label">Matching states and UTs</span><br><span class="value">${names.length}</span></p>
+      <ul>${names.map((name) => `<li>${name}${isBelowReplacementFertility(name, indicator) ? " (below replacement level)" : ""}</li>`).join("")}</ul>
     `;
   }
 
   function updateIndicatorDetails() {
     const indicator = getIndicator();
     const analytics = getAnalytics();
-    const validEntries = analytics.ordered;
-    const best = validEntries[0];
-    const worst = validEntries[validEntries.length - 1];
-
+    const valid = analytics.ordered;
+    const best = valid[0];
+    const worst = valid[valid.length - 1];
     ui.indicatorDetails.innerHTML = `
       <p><span class="label">Indicator</span><br><span class="value">${indicator.display_label}</span></p>
-      <p><span class="label">Polarity</span><br><span class="value">${getPolarity(indicator)}</span></p>
+      <p><span class="label">Polarity</span><br><span class="value">${indicator.polarity}</span></p>
       <p><span class="label">India NFHS-6 value</span><br><span class="value">${formatValue(indicator.india_nfhs6, indicator.precision, indicator.unit)}</span></p>
-      <p><span class="label">States and UTs with data</span><br><span class="value">${validEntries.length}</span></p>
+      <p><span class="label">States and UTs with data</span><br><span class="value">${valid.length}</span></p>
       <p><span class="label">Best-performing state or UT</span><br><span class="value">${best ? best.regionName : "NA"}</span></p>
       <p><span class="label">Worst-performing state or UT</span><br><span class="value">${worst ? worst.regionName : "NA"}</span></p>
       <p><span class="label">Explanation</span><br><span class="value">${
         state.mode === "india"
-          ? "Colours are centred on the India NFHS-6 value and intensify as states move farther from that reference point."
-          : "Colours show improvement or regression from the same state or UT’s NFHS-5 value."
+          ? "Colours are centred on the India NFHS-6 value from the factsheet."
+          : "Colours show improvement or regression since the same state or UT’s NFHS-5 value."
       }</span></p>
       ${
         /total fertility rate|tfr/i.test(indicator.label)
@@ -523,10 +511,12 @@
     `;
   }
 
-  function renderHoverPanel(regionName, entry) {
+  function renderHover(regionName) {
     const indicator = getIndicator();
-    const values = getRegionValue(regionName);
-    if (!values || !entry || entry.bucket.id === "missing") {
+    const entry = getEntry(regionName);
+    const value = getRegionValue(regionName, indicator.id);
+
+    if (!value || !entry || entry.bucket.id === "missing") {
       ui.hoverDetails.className = "stack";
       ui.hoverDetails.innerHTML = `
         <p><span class="label">State or UT</span><br><span class="value">${regionName}</span></p>
@@ -536,250 +526,217 @@
     }
 
     if (state.mode === "india") {
-      const rawDiff = values.nfhs6 - values.india_nfhs6;
+      const rawDiff = value.nfhs6 - value.india_nfhs6;
       ui.hoverDetails.className = "stack";
       ui.hoverDetails.innerHTML = `
-        <p><span class="label">State or UT</span><br><span class="value">${regionName}</span></p>
-        <p><span class="label">Indicator</span><br><span class="value">${indicator.display_label}</span></p>
+        <p><span class="label">State/UT name</span><br><span class="value">${regionName}</span></p>
+        <p><span class="label">Exact indicator label</span><br><span class="value">${indicator.display_label}</span></p>
         <p><span class="label">Polarity</span><br><span class="value">${indicator.polarity}</span></p>
-        <p><span class="label">NFHS-6 state or UT value</span><br><span class="value">${formatValue(values.nfhs6, indicator.precision, indicator.unit)}</span></p>
-        <p><span class="label">India NFHS-6 value</span><br><span class="value">${formatValue(values.india_nfhs6, indicator.precision, indicator.unit)}</span></p>
-        <p><span class="label">NFHS-5 state or UT value</span><br><span class="value">${formatValue(values.nfhs5, indicator.precision, indicator.unit)}</span></p>
+        <p><span class="label">NFHS-6 state/UT value</span><br><span class="value">${formatValue(value.nfhs6, indicator.precision, indicator.unit)}</span></p>
+        <p><span class="label">India NFHS-6 value</span><br><span class="value">${formatValue(value.india_nfhs6, indicator.precision, indicator.unit)}</span></p>
+        <p><span class="label">NFHS-5 state/UT value</span><br><span class="value">${formatValue(value.nfhs5, indicator.precision, indicator.unit)}</span></p>
         <p><span class="label">Difference from India average</span><br><span class="value">${formatDiff(rawDiff, indicator.precision, indicator.unit)}</span></p>
-        <p><span class="label">Status</span><br><span class="value">${entry.status}</span></p>
-        <p><span class="label">Percentile among states and UTs</span><br><span class="value">${formatPercentile(entry.percentile)}</span></p>
-        <p><span class="label">Rank among states and UTs</span><br><span class="value">${entry.rank ?? "NA"}</span></p>
-        <p><span class="label">z-score from India average</span><br><span class="value">${formatZ(entry.zFromIndia)}</span></p>
+        <p><span class="label">Better/worse status</span><br><span class="value">${entry.status}</span></p>
+        <p><span class="label">Percentile among states/UTs</span><br><span class="value">${formatNumber(entry.percentile, 0)}</span></p>
+        <p><span class="label">Rank among states/UTs</span><br><span class="value">${entry.rank}</span></p>
+        <p><span class="label">z-score from India average</span><br><span class="value">${formatNumber(entry.zFromIndia, 2)}</span></p>
         <p><span class="label">Colour bucket</span><br><span class="value">${entry.bucket.label}</span></p>
         ${
-          isBelowReplacementFertility(regionName, indicator)
+          /total fertility rate|tfr/i.test(indicator.label)
             ? `<p><span class="label">Replacement-level benchmark</span><br><span class="value">2.1</span></p>
-               <p><span class="label">Fertility status</span><br><span class="value">Below replacement level</span></p>`
-            : /total fertility rate|tfr/i.test(indicator.label)
-              ? `<p><span class="label">Replacement-level benchmark</span><br><span class="value">2.1</span></p>
-                 <p><span class="label">Fertility status</span><br><span class="value">At/above replacement level</span></p>`
-              : ""
+               <p><span class="label">Status</span><br><span class="value">${isBelowReplacementFertility(regionName, indicator) ? "Below replacement level" : "At/above replacement level"}</span></p>`
+            : ""
         }
       `;
-      return;
-    }
-
-    const rawChange = values.nfhs6 - values.nfhs5;
-    ui.hoverDetails.className = "stack";
-    ui.hoverDetails.innerHTML = `
-      <p><span class="label">State or UT</span><br><span class="value">${regionName}</span></p>
-      <p><span class="label">Indicator</span><br><span class="value">${indicator.display_label}</span></p>
-      <p><span class="label">Polarity</span><br><span class="value">${indicator.polarity}</span></p>
-      <p><span class="label">NFHS-6 state or UT value</span><br><span class="value">${formatValue(values.nfhs6, indicator.precision, indicator.unit)}</span></p>
-      <p><span class="label">NFHS-5 state or UT value</span><br><span class="value">${formatValue(values.nfhs5, indicator.precision, indicator.unit)}</span></p>
-      <p><span class="label">Raw change from NFHS-5 to NFHS-6</span><br><span class="value">${formatDiff(rawChange, indicator.precision, indicator.unit)}</span></p>
-      <p><span class="label">Improvement score after polarity adjustment</span><br><span class="value">${formatDiff(entry.improvementScore, indicator.precision, indicator.unit)}</span></p>
-      <p><span class="label">Status</span><br><span class="value">${entry.status}</span></p>
-      <p><span class="label">Improvement percentile</span><br><span class="value">${formatPercentile(entry.percentile)}</span></p>
-      <p><span class="label">Rank by improvement</span><br><span class="value">${entry.rank ?? "NA"}</span></p>
-      <p><span class="label">changeZ</span><br><span class="value">${formatZ(entry.changeZ)}</span></p>
-      <p><span class="label">Colour bucket</span><br><span class="value">${entry.bucket.label}</span></p>
-      ${
-        isBelowReplacementFertility(regionName, indicator)
-          ? `<p><span class="label">Replacement-level benchmark</span><br><span class="value">2.1</span></p>
-             <p><span class="label">Fertility status</span><br><span class="value">Below replacement level</span></p>`
-          : /total fertility rate|tfr/i.test(indicator.label)
+    } else {
+      const rawChange = value.nfhs6 - value.nfhs5;
+      ui.hoverDetails.className = "stack";
+      ui.hoverDetails.innerHTML = `
+        <p><span class="label">State/UT name</span><br><span class="value">${regionName}</span></p>
+        <p><span class="label">Exact indicator label</span><br><span class="value">${indicator.display_label}</span></p>
+        <p><span class="label">Polarity</span><br><span class="value">${indicator.polarity}</span></p>
+        <p><span class="label">NFHS-6 state/UT value</span><br><span class="value">${formatValue(value.nfhs6, indicator.precision, indicator.unit)}</span></p>
+        <p><span class="label">NFHS-5 state/UT value</span><br><span class="value">${formatValue(value.nfhs5, indicator.precision, indicator.unit)}</span></p>
+        <p><span class="label">Raw change from NFHS-5 to NFHS-6</span><br><span class="value">${formatDiff(rawChange, indicator.precision, indicator.unit)}</span></p>
+        <p><span class="label">Improvement score</span><br><span class="value">${formatDiff(entry.improvementScore, indicator.precision, indicator.unit)}</span></p>
+        <p><span class="label">Improved/worsened status</span><br><span class="value">${entry.status}</span></p>
+        <p><span class="label">Improvement percentile</span><br><span class="value">${formatNumber(entry.percentile, 0)}</span></p>
+        <p><span class="label">Rank by improvement</span><br><span class="value">${entry.rank}</span></p>
+        <p><span class="label">changeZ</span><br><span class="value">${formatNumber(entry.changeZ, 2)}</span></p>
+        <p><span class="label">Colour bucket</span><br><span class="value">${entry.bucket.label}</span></p>
+        ${
+          /total fertility rate|tfr/i.test(indicator.label)
             ? `<p><span class="label">Replacement-level benchmark</span><br><span class="value">2.1</span></p>
-               <p><span class="label">Fertility status</span><br><span class="value">At/above replacement level</span></p>`
+               <p><span class="label">Status</span><br><span class="value">${isBelowReplacementFertility(regionName, indicator) ? "Below replacement level" : "At/above replacement level"}</span></p>`
             : ""
-      }
-    `;
+        }
+      `;
+    }
   }
 
-  function renderTooltip(event, regionName, entry) {
+  function showTooltip(event, regionName) {
     const indicator = getIndicator();
-    const values = getRegionValue(regionName);
-    if (!indicator || !values || !entry || entry.bucket.id === "missing") {
-      ui.tooltip.innerHTML = `<strong>${regionName}</strong><br>Data unavailable`;
-      ui.tooltip.classList.remove("hidden");
-      ui.tooltip.style.left = `${event.offsetX + 16}px`;
-      ui.tooltip.style.top = `${event.offsetY + 16}px`;
-      return;
-    }
+    const entry = getEntry(regionName);
+    const value = getRegionValue(regionName, indicator.id);
 
-    if (state.mode === "india") {
-      const rawDiff = values.nfhs6 - values.india_nfhs6;
+    if (!value || !entry || entry.bucket.id === "missing") {
+      ui.tooltip.innerHTML = `<strong>${regionName}</strong><br>Data unavailable`;
+    } else if (state.mode === "india") {
       ui.tooltip.innerHTML = `
         <strong>${regionName}</strong><br>
         ${indicator.display_label}<br>
-        Polarity: ${indicator.polarity}<br>
-        NFHS-6: ${formatValue(values.nfhs6, indicator.precision, indicator.unit)}<br>
-        India NFHS-6: ${formatValue(values.india_nfhs6, indicator.precision, indicator.unit)}<br>
-        NFHS-5: ${formatValue(values.nfhs5, indicator.precision, indicator.unit)}<br>
-        Difference from India: ${formatDiff(rawDiff, indicator.precision, indicator.unit)}<br>
-        Status: ${entry.status}<br>
-        Percentile: ${formatPercentile(entry.percentile)}<br>
-        Rank: ${entry.rank ?? "NA"}<br>
-        z-score: ${formatZ(entry.zFromIndia)}<br>
+        Percentile: ${formatNumber(entry.percentile, 0)}<br>
+        Rank: ${entry.rank}<br>
+        z-score: ${formatNumber(entry.zFromIndia, 2)}<br>
         Bucket: ${entry.bucket.label}
       `;
     } else {
-      const rawChange = values.nfhs6 - values.nfhs5;
       ui.tooltip.innerHTML = `
         <strong>${regionName}</strong><br>
         ${indicator.display_label}<br>
-        Polarity: ${indicator.polarity}<br>
-        NFHS-6: ${formatValue(values.nfhs6, indicator.precision, indicator.unit)}<br>
-        NFHS-5: ${formatValue(values.nfhs5, indicator.precision, indicator.unit)}<br>
-        Raw change: ${formatDiff(rawChange, indicator.precision, indicator.unit)}<br>
-        Improvement score: ${formatDiff(entry.improvementScore, indicator.precision, indicator.unit)}<br>
-        Status: ${entry.status}<br>
-        Improvement percentile: ${formatPercentile(entry.percentile)}<br>
-        Rank: ${entry.rank ?? "NA"}<br>
-        changeZ: ${formatZ(entry.changeZ)}<br>
+        Improvement percentile: ${formatNumber(entry.percentile, 0)}<br>
+        Rank: ${entry.rank}<br>
+        changeZ: ${formatNumber(entry.changeZ, 2)}<br>
         Bucket: ${entry.bucket.label}
       `;
     }
-
-    if (/total fertility rate|tfr/i.test(indicator.label)) {
-      ui.tooltip.innerHTML += `<br>Replacement-level benchmark: 2.1<br>Status: ${
-        isBelowReplacementFertility(regionName, indicator) ? "Below replacement level" : "At/above replacement level"
-      }`;
-    }
-
     ui.tooltip.classList.remove("hidden");
     ui.tooltip.style.left = `${event.offsetX + 16}px`;
     ui.tooltip.style.top = `${event.offsetY + 16}px`;
   }
 
-  function drawMap() {
-    ui.svg.selectAll("*").remove();
-    const indicator = getIndicator();
-    const projection = d3.geoMercator().fitSize([900, 900], state.geojson);
+  function createPatternDefs(svg) {
+    const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+    defs.innerHTML = `
+      <pattern id="missing-pattern" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(45)">
+        <rect width="10" height="10" fill="#c7c2b8"></rect>
+        <line x1="0" y1="0" x2="0" y2="10" stroke="rgba(255,255,255,0.75)" stroke-width="3"></line>
+      </pattern>
+    `;
+    svg.appendChild(defs);
+  }
+
+  function renderMap() {
+    ui.svg.innerHTML = "";
+    createPatternDefs(ui.svg);
+
+    const width = 900;
+    const height = 900;
+    const projection = d3.geoMercator().fitSize([width, height], state.geojson);
     const path = d3.geoPath(projection);
 
-    const defs = ui.svg.append("defs");
-    const missingPattern = defs
-      .append("pattern")
-      .attr("id", "missing-pattern")
-      .attr("patternUnits", "userSpaceOnUse")
-      .attr("width", 10)
-      .attr("height", 10)
-      .attr("patternTransform", "rotate(45)");
+    const background = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    background.setAttribute("class", "map-bg");
+    background.setAttribute("width", String(width));
+    background.setAttribute("height", String(height));
+    background.addEventListener("click", clearLegendSelection);
+    ui.svg.appendChild(background);
 
-    missingPattern
-      .append("rect")
-      .attr("width", 10)
-      .attr("height", 10)
-      .attr("fill", "#c7c2b8");
-
-    missingPattern
-      .append("line")
-      .attr("x1", 0)
-      .attr("y1", 0)
-      .attr("x2", 0)
-      .attr("y2", 10)
-      .attr("stroke", "rgba(255,255,255,0.75)")
-      .attr("stroke-width", 3);
-
-    ui.svg
-      .append("rect")
-      .attr("class", "map-bg")
-      .attr("width", 900)
-      .attr("height", 900)
-      .on("click", clearLegendSelection);
-
-    const regionsGroup = ui.svg.append("g");
-
-    regionsGroup
-      .selectAll("path")
-      .data(state.geojson.features)
-      .join("path")
-      .attr("class", (feature) => {
-        const regionName = feature.properties.name;
-        const classes = ["region"];
-        if (state.legendSelection && !getSelectionMatch(regionName)) {
-          classes.push("dimmed");
-        }
-        if (state.legendSelection && getSelectionMatch(regionName)) {
-          classes.push("selected");
-        }
-        return classes.join(" ");
-      })
-      .attr("fill", (feature) => {
-        const bucket = getEntry(feature.properties.name).bucket;
-        return bucket.id === "missing" ? "url(#missing-pattern)" : bucket.color;
-      })
-      .attr("d", path)
-      .on("mousemove", function (event, feature) {
-        event.stopPropagation();
-        const regionName = feature.properties.name;
-        const entry = getEntry(regionName);
-        renderTooltip(event, regionName, entry);
-        renderHoverPanel(regionName, entry);
-        d3.select(this).classed("hovered", true);
-      })
-      .on("mouseleave", function () {
-        ui.tooltip.classList.add("hidden");
-        ui.hoverDetails.className = "stack muted";
-        ui.hoverDetails.textContent = "Hover over a state or union territory.";
-        d3.select(this).classed("hovered", false);
-      })
-      .on("click", function (event) {
-        event.stopPropagation();
+    state.geojson.features.forEach((feature) => {
+      const regionName = feature.properties.name;
+      const entry = getEntry(regionName);
+      const region = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      region.setAttribute("d", path(feature));
+      let className = "region";
+      if (state.activeLegendSelection && !isSelectedByLegend(regionName)) {
+        className += " dimmed";
+      }
+      if (state.activeLegendSelection && isSelectedByLegend(regionName)) {
+        className += " selected";
+      }
+      region.setAttribute("class", className);
+      region.setAttribute("fill", entry.bucket.id === "missing" ? "url(#missing-pattern)" : entry.bucket.color);
+      region.addEventListener("mousemove", (event) => {
+        region.classList.add("hovered");
+        renderHover(regionName);
+        showTooltip(event, regionName);
       });
+      region.addEventListener("mouseleave", () => {
+        region.classList.remove("hovered");
+        ui.tooltip.classList.add("hidden");
+      });
+      region.addEventListener("click", (event) => event.stopPropagation());
+      ui.svg.appendChild(region);
+    });
 
-    const fertilityFeatures = state.geojson.features.filter((feature) =>
-      isBelowReplacementFertility(feature.properties.name, indicator),
-    );
-
-    if (fertilityFeatures.length) {
-      ui.svg
-        .append("g")
-        .selectAll("path")
-        .data(fertilityFeatures)
-        .join("path")
-        .attr("class", (feature) => {
-          const regionName = feature.properties.name;
-          const classes = ["fertility-overlay"];
-          if (state.legendSelection && !getSelectionMatch(regionName)) {
-            classes.push("dimmed");
-          }
-          return classes.join(" ");
-        })
-        .attr("d", path);
+    const indicator = getIndicator();
+    if (/total fertility rate|tfr/i.test(indicator.label)) {
+      state.geojson.features.forEach((feature) => {
+        const regionName = feature.properties.name;
+        if (!isBelowReplacementFertility(regionName, indicator)) {
+          return;
+        }
+        const overlay = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        overlay.setAttribute("d", path(feature));
+        overlay.setAttribute(
+          "class",
+          `fertility-overlay${state.activeLegendSelection && !isSelectedByLegend(regionName) ? " dimmed" : ""}`,
+        );
+        ui.svg.appendChild(overlay);
+      });
     }
+  }
 
+  function renderControls() {
+    ui.indicatorSelect.innerHTML = "";
+    state.dataset.indicators.forEach((indicator) => {
+      const option = document.createElement("option");
+      option.value = indicator.id;
+      option.textContent = indicator.display_label;
+      ui.indicatorSelect.appendChild(option);
+    });
+    ui.indicatorSelect.value = state.selectedIndicatorId;
+  }
+
+  function render() {
     updateLegend();
     updateIndicatorDetails();
     updateSelectedStatesPanel();
+    renderMap();
   }
 
-  async function bootstrap() {
+  async function init() {
+    clearError();
+    if (!window.d3) {
+      throw new Error("The D3 library did not load.");
+    }
+
     const [dataset, geojson] = await Promise.all([
-      fetch("data/nfhs_state_indicators.json").then((response) => response.json()),
-      fetch("data/india_states_ut.geojson").then((response) => response.json()),
+      fetchJson("./data/nfhs_state_indicators.json", "Indicator dataset"),
+      fetchJson("./data/india_states_ut.geojson", "GeoJSON boundary file"),
     ]);
+
+    validateDataset(dataset);
+    validateGeojson(geojson);
 
     state.dataset = dataset;
     state.geojson = geojson;
-    renderIndicatorSelect();
-    drawMap();
+    state.indicatorsById = new Map(dataset.indicators.map((indicator) => [indicator.id, indicator]));
+    state.regionsByGeoName = new Map(dataset.regions.map((region) => [region.geojson_name, region]));
+    state.selectedIndicatorId = dataset.indicators[0].id;
+
+    renderControls();
+    render();
 
     ui.indicatorSelect.addEventListener("change", (event) => {
-      state.indicator = event.target.value;
-      state.legendSelection = null;
-      drawMap();
+      state.selectedIndicatorId = event.target.value;
+      state.activeLegendSelection = null;
+      render();
     });
 
     ui.modeInputs.forEach((input) => {
       input.addEventListener("change", (event) => {
         state.mode = event.target.value;
-        state.legendSelection = null;
-        drawMap();
+        state.activeLegendSelection = null;
+        render();
       });
     });
 
     ui.clearSelection.addEventListener("click", clearLegendSelection);
   }
 
-  bootstrap().catch((error) => {
+  init().catch((error) => {
     console.error(error);
-    ui.indicatorDetails.innerHTML = "<p>Failed to load local NFHS data.</p>";
+    showError(`Failed to load the app data. ${error.message}`);
   });
 })();
