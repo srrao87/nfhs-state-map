@@ -716,6 +716,7 @@
       ui.indicatorSelect.appendChild(option);
       ui.indicatorSelect.value = "";
       ui.indicatorSelect.disabled = true;
+      ui.indicatorSelect.size = 1;
       return;
     }
 
@@ -732,6 +733,10 @@
       state.selectedIndicatorId = filteredIndicators[0].id;
     }
     ui.indicatorSelect.value = state.selectedIndicatorId;
+    ui.indicatorSelect.size =
+      state.indicatorSearchTerm.trim() && filteredIndicators.length > 1
+        ? Math.min(filteredIndicators.length, 8)
+        : 1;
   }
 
   function render() {

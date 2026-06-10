@@ -121,6 +121,10 @@ input[type="search"] {
   color: var(--ink);
 }
 
+select[size]:not([size="1"]) {
+  min-height: 12rem;
+}
+
 input[type="search"]::-webkit-search-cancel-button {
   cursor: pointer;
 }
