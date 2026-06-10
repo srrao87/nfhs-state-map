@@ -21,18 +21,25 @@
 
       <section class="toolbar">
         <label class="control">
-          <span>Search indicators</span>
-          <input
-            id="indicator-search"
-            type="search"
-            aria-label="Search indicators"
-            placeholder="Type part of an indicator name"
-          />
-        </label>
-
-        <label class="control">
           <span>Indicator</span>
-          <select id="indicator-select" aria-label="Indicator"></select>
+          <div class="indicator-combobox">
+            <input
+              id="indicator-input"
+              type="text"
+              aria-label="Indicator"
+              autocomplete="off"
+              placeholder="Browse or search indicators"
+            />
+            <button
+              id="indicator-toggle"
+              type="button"
+              class="indicator-toggle"
+              aria-label="Show indicator list"
+            >
+              ▾
+            </button>
+            <div id="indicator-options" class="indicator-options hidden"></div>
+          </div>
         </label>
 
         <fieldset class="mode-toggle">

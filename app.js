@@ -31,14 +31,16 @@
     regionsByGeoName: new Map(),
     selectedIndicatorId: null,
     indicatorSearchTerm: "",
+    indicatorDropdownOpen: false,
     mode: "india",
     activeLegendSelection: null,
   };
 
   const ui = {
     error: document.querySelector("#app-error"),
-    indicatorSearch: document.querySelector("#indicator-search"),
-    indicatorSelect: document.querySelector("#indicator-select"),
+    indicatorInput: document.querySelector("#indicator-input"),
+    indicatorToggle: document.querySelector("#indicator-toggle"),
+    indicatorOptions: document.querySelector("#indicator-options"),
     modeInputs: Array.from(document.querySelectorAll('input[name="mode"]')),
     legendItems: document.querySelector("#legend-items"),
     legendNote: document.querySelector("#legend-note"),
@@ -178,6 +180,10 @@
       );
       return searchTokens.every((token) => haystack.includes(token));
     });
+  }
+
+  function getSelectedIndicatorLabel() {
+    return getIndicator()?.display_label || "";
   }
 
   function getRegionValue(regionName, indicatorId) {
@@ -707,36 +713,45 @@
 
   function renderControls() {
     const filteredIndicators = getFilteredIndicators();
-    ui.indicatorSelect.innerHTML = "";
+    if (!state.indicatorDropdownOpen) {
+      ui.indicatorInput.value = getSelectedIndicatorLabel();
+    }
 
-    if (!filteredIndicators.length) {
-      const option = document.createElement("option");
-      option.value = "";
-      option.textContent = "No matching indicators found";
-      ui.indicatorSelect.appendChild(option);
-      ui.indicatorSelect.value = "";
-      ui.indicatorSelect.disabled = true;
-      ui.indicatorSelect.size = 1;
+    ui.indicatorOptions.innerHTML = "";
+    if (state.indicatorDropdownOpen) {
+      ui.indicatorOptions.classList.remove("hidden");
+    } else {
+      ui.indicatorOptions.classList.add("hidden");
+    }
+
+    if (!state.indicatorDropdownOpen) {
       return;
     }
 
-    ui.indicatorSelect.disabled = false;
-    filteredIndicators.forEach((indicator) => {
-      const option = document.createElement("option");
-      option.value = indicator.id;
-      option.textContent = indicator.display_label;
-      ui.indicatorSelect.appendChild(option);
-    });
-
-    const hasSelectedIndicator = filteredIndicators.some((indicator) => indicator.id === state.selectedIndicatorId);
-    if (!hasSelectedIndicator) {
-      state.selectedIndicatorId = filteredIndicators[0].id;
+    if (!filteredIndicators.length) {
+      const empty = document.createElement("div");
+      empty.className = "indicator-empty";
+      empty.textContent = "No matching indicators found";
+      ui.indicatorOptions.appendChild(empty);
+      return;
     }
-    ui.indicatorSelect.value = state.selectedIndicatorId;
-    ui.indicatorSelect.size =
-      state.indicatorSearchTerm.trim() && filteredIndicators.length > 1
-        ? Math.min(filteredIndicators.length, 8)
-        : 1;
+
+    filteredIndicators.forEach((indicator) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = `indicator-option${indicator.id === state.selectedIndicatorId ? " active" : ""}`;
+      option.textContent = indicator.display_label;
+      option.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        state.selectedIndicatorId = indicator.id;
+        state.indicatorSearchTerm = "";
+        state.indicatorDropdownOpen = false;
+        state.activeLegendSelection = null;
+        renderControls();
+        render();
+      });
+      ui.indicatorOptions.appendChild(option);
+    });
   }
 
   function render() {
@@ -769,17 +784,33 @@
     renderControls();
     render();
 
-    ui.indicatorSearch.addEventListener("input", (event) => {
-      state.indicatorSearchTerm = event.target.value;
-      state.activeLegendSelection = null;
+    ui.indicatorInput.addEventListener("focus", () => {
+      state.indicatorDropdownOpen = true;
+      state.indicatorSearchTerm = "";
+      ui.indicatorInput.value = "";
       renderControls();
-      render();
     });
 
-    ui.indicatorSelect.addEventListener("change", (event) => {
-      state.selectedIndicatorId = event.target.value;
+    ui.indicatorInput.addEventListener("input", (event) => {
+      state.indicatorSearchTerm = event.target.value;
+      state.indicatorDropdownOpen = true;
       state.activeLegendSelection = null;
-      render();
+      renderControls();
+    });
+
+    ui.indicatorInput.addEventListener("blur", () => {
+      setTimeout(() => {
+        state.indicatorDropdownOpen = false;
+        state.indicatorSearchTerm = "";
+        renderControls();
+      }, 120);
+    });
+
+    ui.indicatorToggle.addEventListener("click", () => {
+      state.indicatorDropdownOpen = !state.indicatorDropdownOpen;
+      state.indicatorSearchTerm = "";
+      ui.indicatorInput.value = state.indicatorDropdownOpen ? "" : getSelectedIndicatorLabel();
+      renderControls();
     });
 
     ui.modeInputs.forEach((input) => {
