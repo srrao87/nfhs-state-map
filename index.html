@@ -21,6 +21,16 @@
 
       <section class="toolbar">
         <label class="control">
+          <span>Search indicators</span>
+          <input
+            id="indicator-search"
+            type="search"
+            aria-label="Search indicators"
+            placeholder="Type part of an indicator name"
+          />
+        </label>
+
+        <label class="control">
           <span>Indicator</span>
           <select id="indicator-select" aria-label="Indicator"></select>
         </label>
@@ -48,8 +58,10 @@
             ></svg>
             <div id="tooltip" class="tooltip hidden"></div>
           </div>
+        </div>
 
-          <section class="legend-card">
+        <aside class="details">
+          <section class="legend-card legend-card-side">
             <div class="legend-header">
               <div>
                 <h2>Legend</h2>
@@ -61,9 +73,7 @@
             </div>
             <div id="legend-items" class="legend-items"></div>
           </section>
-        </div>
 
-        <aside class="details">
           <section class="panel">
             <h2>Selected Indicator</h2>
             <div id="indicator-details" class="stack"></div>

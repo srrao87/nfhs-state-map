@@ -30,12 +30,14 @@
     indicatorsById: new Map(),
     regionsByGeoName: new Map(),
     selectedIndicatorId: null,
+    indicatorSearchTerm: "",
     mode: "india",
     activeLegendSelection: null,
   };
 
   const ui = {
     error: document.querySelector("#app-error"),
+    indicatorSearch: document.querySelector("#indicator-search"),
     indicatorSelect: document.querySelector("#indicator-select"),
     modeInputs: Array.from(document.querySelectorAll('input[name="mode"]')),
     legendItems: document.querySelector("#legend-items"),
@@ -155,6 +157,27 @@
 
   function getIndicator(indicatorId) {
     return state.indicatorsById.get(indicatorId || state.selectedIndicatorId);
+  }
+
+  function normalizeSearchText(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  }
+
+  function getFilteredIndicators() {
+    const searchTerm = normalizeSearchText(state.indicatorSearchTerm);
+    if (!searchTerm) {
+      return state.dataset.indicators;
+    }
+    const searchTokens = searchTerm.split(/\s+/).filter(Boolean);
+    return state.dataset.indicators.filter((indicator) => {
+      const haystack = normalizeSearchText(
+        `${indicator.display_label} ${indicator.label} ${indicator.category || ""}`,
+      );
+      return searchTokens.every((token) => haystack.includes(token));
+    });
   }
 
   function getRegionValue(regionName, indicatorId) {
@@ -683,13 +706,31 @@
   }
 
   function renderControls() {
+    const filteredIndicators = getFilteredIndicators();
     ui.indicatorSelect.innerHTML = "";
-    state.dataset.indicators.forEach((indicator) => {
+
+    if (!filteredIndicators.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "No matching indicators found";
+      ui.indicatorSelect.appendChild(option);
+      ui.indicatorSelect.value = "";
+      ui.indicatorSelect.disabled = true;
+      return;
+    }
+
+    ui.indicatorSelect.disabled = false;
+    filteredIndicators.forEach((indicator) => {
       const option = document.createElement("option");
       option.value = indicator.id;
       option.textContent = indicator.display_label;
       ui.indicatorSelect.appendChild(option);
     });
+
+    const hasSelectedIndicator = filteredIndicators.some((indicator) => indicator.id === state.selectedIndicatorId);
+    if (!hasSelectedIndicator) {
+      state.selectedIndicatorId = filteredIndicators[0].id;
+    }
     ui.indicatorSelect.value = state.selectedIndicatorId;
   }
 
@@ -722,6 +763,13 @@
 
     renderControls();
     render();
+
+    ui.indicatorSearch.addEventListener("input", (event) => {
+      state.indicatorSearchTerm = event.target.value;
+      state.activeLegendSelection = null;
+      renderControls();
+      render();
+    });
 
     ui.indicatorSelect.addEventListener("change", (event) => {
       state.selectedIndicatorId = event.target.value;
