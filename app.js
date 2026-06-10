@@ -49,8 +49,10 @@
   };
 
   function showError(message) {
-    ui.error.textContent = message;
-    ui.error.classList.remove("hidden");
+    if (ui.error) {
+      ui.error.textContent = message;
+      ui.error.classList.remove("hidden");
+    }
     ui.indicatorDetails.innerHTML = `<p>${message}</p>`;
     ui.selectedStates.className = "stack muted";
     ui.selectedStates.textContent = "Unable to load the visualisation.";
@@ -62,6 +64,9 @@
   }
 
   function clearError() {
+    if (!ui.error) {
+      return;
+    }
     ui.error.textContent = "";
     ui.error.classList.add("hidden");
   }
